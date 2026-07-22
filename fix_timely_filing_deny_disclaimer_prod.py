@@ -393,21 +393,48 @@ def main() -> None:
         }
 
     def _dup_hist(run) -> dict:
+        """Determine whether a PRIOR claim/line in history matches this claim per the
+        SOP Step-10 criterion: SAME date(s) of service AND same provider (a duplicate
+        is the same provider re-billing the same service — the auditor also cites the
+        procedure code, which is not exposed in the tool result).
+
+        The tool's ``filtered_claims`` only narrows on member + a service-date window,
+        so it returns different-provider / different-DOS claims that are NOT true
+        matches. ``total_claims_found_before_filtering`` is raw pre-filter noise. Per
+        auditor UAT on 25XI94349600 we re-apply the exact criterion here, so a claim
+        with pre-filter hits but no true match falls to the Step-10 "no match in
+        history → deny for timely filing, skip to Step 15" branch.
+        """
         d = _tool(run, "facets_get_duplicate_claim") or {}
         items = d.get("line_items") or []
         cur = str(run.claim_id or "")
-        # A "match in history" (SOP Step 10) is a PRIOR claim/line that survives the
-        # tool's own de-dup filter (same DOS + procedure) — i.e. an entry in
-        # ``filtered_claims`` OTHER than this claim itself. The raw
-        # ``total_claims_found_before_filtering`` count is pre-filter noise and must
-        # NOT be treated as a match: per auditor UAT on 25XI94349600, a claim with
-        # pre-filter hits but no real filtered match must fall to the Step-10
-        # "no match in history → deny for timely filing, skip to Step 15" branch.
-        found = [fc for li in items for fc in (li.get("filtered_claims") or [])
-                 if str(fc.get("CLCL_ID") or "") != cur]
-        sample = found[0].get("CLCL_ID") if found else None
-        paids = [p for p in (_parse_date(fc.get("CLCL_PAID_DT")) for fc in found) if p]
-        return {"has": bool(found), "n": len(found),
+        all_fc = [fc for li in items for fc in (li.get("filtered_claims") or [])]
+        # Audited claim's own key fields: prefer its self-entry in the dup result,
+        # else fall back to the claim summary.
+        self_fc = next((fc for fc in all_fc
+                        if str(fc.get("CLCL_ID") or "") == cur), None) or {}
+        rec = _find_claim_dict(_tool(run, "facets_get_summary")) or {}
+        cur_prpr = str(self_fc.get("PRPR_ID") or rec.get("PRPR_ID") or "").strip()
+        cur_lo = _parse_date(self_fc.get("CLCL_LOW_SVC_DT") or rec.get("CLCL_LOW_SVC_DT"))
+        cur_hi = _parse_date(self_fc.get("CLCL_HIGH_SVC_DT") or rec.get("CLCL_HIGH_SVC_DT"))
+
+        def _is_match(fc) -> bool:
+            if str(fc.get("CLCL_ID") or "") == cur:
+                return False   # the claim itself is never its own duplicate
+            lo = _parse_date(fc.get("CLCL_LOW_SVC_DT"))
+            hi = _parse_date(fc.get("CLCL_HIGH_SVC_DT"))
+            # same DOS — the service span must equal the audited claim's DOS span
+            if not (cur_lo and cur_hi and lo == cur_lo and hi == cur_hi):
+                return False
+            # same provider — only enforced when the audited provider is known
+            if cur_prpr and str(fc.get("PRPR_ID") or "").strip() != cur_prpr:
+                return False
+            return True
+
+        matches = [fc for fc in all_fc if _is_match(fc)]
+        sample = matches[0].get("CLCL_ID") if matches else None
+        paids = [p for p in (_parse_date(fc.get("CLCL_PAID_DT")) for fc in matches) if p]
+        return {"has": bool(matches), "n": len(matches),
                 "sample": sample, "oldest_paid": min(paids) if paids else None}
 
     def _member_state(run) -> dict:
@@ -987,23 +1014,40 @@ def main() -> None:
             f = _claim_facts(run)
             d = _tool(run, "facets_get_duplicate_claim") or {}
             items = d.get("line_items") or []
+            cur = str(run.claim_id or "")
+            all_fc = [fc for li in items for fc in (li.get("filtered_claims") or [])]
+            self_fc = next((fc for fc in all_fc
+                            if str(fc.get("CLCL_ID") or "") == cur), None) or {}
+            rec = _find_claim_dict(_tool(run, "facets_get_summary")) or {}
+            cur_prpr = str(self_fc.get("PRPR_ID") or rec.get("PRPR_ID") or "").strip()
+            cur_lo = _parse_date(self_fc.get("CLCL_LOW_SVC_DT") or rec.get("CLCL_LOW_SVC_DT"))
+            cur_hi = _parse_date(self_fc.get("CLCL_HIGH_SVC_DT") or rec.get("CLCL_HIGH_SVC_DT"))
             dup = _dup_hist(run)
             _p(f"\n  {cid}  DOS={_fmt(f.get('dos'))}  recd={_fmt(f.get('recd'))}  "
                f"type={'cob' if f.get('is_cob') else 'newday'}")
+            _p(f"    audited claim: svc={_fmt(cur_lo)}..{_fmt(cur_hi)}  provider={cur_prpr or '(unknown)'}")
             _p(f"    total_claims_found_before_filtering = "
                f"{d.get('total_claims_found_before_filtering')}")
-            _p(f"    line_items = {len(items)}")
             for li in items:
                 fcs = li.get("filtered_claims") or []
                 _p(f"      line CDML {li.get('CDML_FROM_DT')}..{li.get('CDML_TO_DT')} "
                    f"seq={li.get('CDML_SEQ_NO')}  filtered_claims={len(fcs)}")
                 for fc in fcs:
-                    same = str(fc.get('CLCL_ID') or '') == str(run.claim_id or '')
-                    _p(f"        - CLCL_ID={fc.get('CLCL_ID')}"
-                       f"{'  <-- THIS CLAIM (self)' if same else ''}  "
-                       f"svc={fc.get('CLCL_LOW_SVC_DT')}..{fc.get('CLCL_HIGH_SVC_DT')}  "
-                       f"paid={fc.get('CLCL_PAID_DT')}  prpr={fc.get('PRPR_ID')}  "
-                       f"name={fc.get('PRPR_NAME')}")
+                    fcid = str(fc.get('CLCL_ID') or '')
+                    lo = _parse_date(fc.get("CLCL_LOW_SVC_DT"))
+                    hi = _parse_date(fc.get("CLCL_HIGH_SVC_DT"))
+                    if fcid == cur:
+                        tag = "SELF (excluded)"
+                    else:
+                        dos_ok = bool(cur_lo and cur_hi and lo == cur_lo and hi == cur_hi)
+                        prov_ok = (not cur_prpr) or (
+                            str(fc.get("PRPR_ID") or "").strip() == cur_prpr)
+                        tag = ("MATCH" if (dos_ok and prov_ok)
+                               else f"no ({'DOS≠' if not dos_ok else ''}"
+                                    f"{'provider≠' if not prov_ok else ''})")
+                    _p(f"        - CLCL_ID={fcid}  svc={fc.get('CLCL_LOW_SVC_DT')}.."
+                       f"{fc.get('CLCL_HIGH_SVC_DT')}  paid={fc.get('CLCL_PAID_DT')}  "
+                       f"prpr={fc.get('PRPR_ID')}  name={fc.get('PRPR_NAME')}  => {tag}")
             _p(f"    => _dup_hist decision: has={dup['has']}  n_real_matches={dup['n']}  "
                f"sample={dup['sample']}")
             _p(f"    => would take {'HISTORY (calc 11/12)' if dup['has'] else 'NO-HISTORY (Step-10 deny/Error, 11/12 N/A)'} path")
