@@ -392,17 +392,19 @@ def main() -> None:
     def _dup_hist(run) -> dict:
         d = _tool(run, "facets_get_duplicate_claim") or {}
         items = d.get("line_items") or []
-        found = []
-        for li in items:
-            for fc in (li.get("filtered_claims") or []):
-                found.append(fc)
-        n = int(d.get("total_claims_found_before_filtering") or 0) or len(found)
-        # Cite a prior claim in history as the example, never the claim itself.
-        sample = next((fc.get("CLCL_ID") for fc in found
-                       if str(fc.get("CLCL_ID") or "") != str(run.claim_id or "")), None)
-        paids = [_parse_date(fc.get("CLCL_PAID_DT")) for fc in found]
-        paids = [p for p in paids if p]
-        return {"has": bool(found) or n > 0, "n": n or len(found),
+        cur = str(run.claim_id or "")
+        # A "match in history" (SOP Step 10) is a PRIOR claim/line that survives the
+        # tool's own de-dup filter (same DOS + procedure) — i.e. an entry in
+        # ``filtered_claims`` OTHER than this claim itself. The raw
+        # ``total_claims_found_before_filtering`` count is pre-filter noise and must
+        # NOT be treated as a match: per auditor UAT on 25XI94349600, a claim with
+        # pre-filter hits but no real filtered match must fall to the Step-10
+        # "no match in history → deny for timely filing, skip to Step 15" branch.
+        found = [fc for li in items for fc in (li.get("filtered_claims") or [])
+                 if str(fc.get("CLCL_ID") or "") != cur]
+        sample = found[0].get("CLCL_ID") if found else None
+        paids = [p for p in (_parse_date(fc.get("CLCL_PAID_DT")) for fc in found) if p]
+        return {"has": bool(found), "n": len(found),
                 "sample": sample, "oldest_paid": min(paids) if paids else None}
 
     def _member_state(run) -> dict:
@@ -637,7 +639,9 @@ def main() -> None:
             calc = (f"the claim was received {days} days from DOS ({d1} to {d2}), beyond the "
                     f"{limit}-day {net} limit{net_note}" if days is not None else
                     f"the claim was not received within the {limit}-day {net} limit{net_note}")
-            return "MET", (
+            # ERR → shown as an "Error" badge (claim is correctly denying for timely
+            # filing) but NOT an audit defect: it rolls up to CLEAN like a Met rule.
+            return "ERR", (
                 f"No matching claim/line (same DOS, procedure code and provider) was found in "
                 f"history and {calc} — not received within the timely filing limit. Allow the "
                 f"system to deny for timely filing and skip to Step 15. The timely-filing denial "
@@ -795,7 +799,9 @@ def main() -> None:
                 continue
             bk = _branch_key(step, ev.condition or "")
             status, reason = _eval(step, bk, C)
-            want_matched = status == "MET"
+            # MET and ERR are both real matches (ERR = correctly-applied system
+            # deny, shown as an Error badge but non-defect); NA = not applicable.
+            want_matched = status in ("MET", "ERR")
             want_skipped = status == "NA"
             want_skip_reason = "not applicable" if status == "NA" else ""
             if (ev.reasoning or "").strip() == reason and ev.matched == want_matched \
@@ -805,7 +811,7 @@ def main() -> None:
             ev.matched = want_matched
             ev.skipped = want_skipped
             ev.skip_reason = want_skip_reason
-            if status == "MET":
+            if status in ("MET", "ERR"):
                 ev.verdict = (ev.action or ev.verdict or "")
             to_update.append(ev)
             eval_changed = True
@@ -838,7 +844,7 @@ def main() -> None:
 
         # 3) trace
         _TS = {"MET": trace_builder.MET, "NA": trace_builder.NOT_APPLICABLE,
-               "NOT_MET": trace_builder.NOT_MET}
+               "NOT_MET": trace_builder.NOT_MET, "ERR": trace_builder.ERROR}
         tchanged = False
         shape_reason: dict[str, tuple[str, str]] = {}  # shape_id -> (exec_status, summary)
         ct = ClaimTrace.objects.filter(run=run).first()
@@ -869,7 +875,9 @@ def main() -> None:
                     status, reason = _eval(step, bk, C)
                     any_row = True
                     first_reason = first_reason or reason
-                    if status == "MET":
+                    # ERR (correctly-applied system deny) is met-like for rollup:
+                    # the step stays CLEAN, and it supplies the governing rationale.
+                    if status in ("MET", "ERR"):
                         any_met = True
                         gov_reason = gov_reason or reason
                     if status != "NA":
