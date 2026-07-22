@@ -843,8 +843,13 @@ def main() -> None:
         run.final_decision_type = final
 
         # 3) trace
+        # ``ERROR`` is a new non-defect rule-level label. Use it if the deployed
+        # trace_builder has it, else fall back to the literal "Error" so this data
+        # fix runs without needing a backend redeploy (the step entry is Met-like,
+        # so the claim rollup stays CLEAN regardless).
+        _ERR_LABEL = getattr(trace_builder, "ERROR", "Error")
         _TS = {"MET": trace_builder.MET, "NA": trace_builder.NOT_APPLICABLE,
-               "NOT_MET": trace_builder.NOT_MET, "ERR": trace_builder.ERROR}
+               "NOT_MET": trace_builder.NOT_MET, "ERR": _ERR_LABEL}
         tchanged = False
         shape_reason: dict[str, tuple[str, str]] = {}  # shape_id -> (exec_status, summary)
         ct = ClaimTrace.objects.filter(run=run).first()
