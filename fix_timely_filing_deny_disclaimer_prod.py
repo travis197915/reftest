@@ -288,6 +288,9 @@ def main() -> None:
                     help="process every in-scope claim, not just the affected ones "
                          "(default: only claims carrying the disclaimer or hitting the "
                          "Step-10 no-history timely-filing deny).")
+    ap.add_argument("--debug-history", action="store_true",
+                    help="read-only: print the facets_get_duplicate_claim breakdown and "
+                         "the history decision for each claim, then exit (no writes).")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--apply", action="store_true")
     opts = ap.parse_args()
@@ -975,6 +978,37 @@ def main() -> None:
     claim_ids = sorted(latest)
     if opts.limit:
         claim_ids = claim_ids[: opts.limit]
+
+    # ---- read-only history diagnostic -----------------------------------
+    if opts.debug_history:
+        _p(f"\n══ facets_get_duplicate_claim breakdown — {len(claim_ids)} claim(s) ══")
+        for cid in claim_ids:
+            run = latest[cid]
+            f = _claim_facts(run)
+            d = _tool(run, "facets_get_duplicate_claim") or {}
+            items = d.get("line_items") or []
+            dup = _dup_hist(run)
+            _p(f"\n  {cid}  DOS={_fmt(f.get('dos'))}  recd={_fmt(f.get('recd'))}  "
+               f"type={'cob' if f.get('is_cob') else 'newday'}")
+            _p(f"    total_claims_found_before_filtering = "
+               f"{d.get('total_claims_found_before_filtering')}")
+            _p(f"    line_items = {len(items)}")
+            for li in items:
+                fcs = li.get("filtered_claims") or []
+                _p(f"      line CDML {li.get('CDML_FROM_DT')}..{li.get('CDML_TO_DT')} "
+                   f"seq={li.get('CDML_SEQ_NO')}  filtered_claims={len(fcs)}")
+                for fc in fcs:
+                    same = str(fc.get('CLCL_ID') or '') == str(run.claim_id or '')
+                    _p(f"        - CLCL_ID={fc.get('CLCL_ID')}"
+                       f"{'  <-- THIS CLAIM (self)' if same else ''}  "
+                       f"svc={fc.get('CLCL_LOW_SVC_DT')}..{fc.get('CLCL_HIGH_SVC_DT')}  "
+                       f"paid={fc.get('CLCL_PAID_DT')}  prpr={fc.get('PRPR_ID')}  "
+                       f"name={fc.get('PRPR_NAME')}")
+            _p(f"    => _dup_hist decision: has={dup['has']}  n_real_matches={dup['n']}  "
+               f"sample={dup['sample']}")
+            _p(f"    => would take {'HISTORY (calc 11/12)' if dup['has'] else 'NO-HISTORY (Step-10 deny/Error, 11/12 N/A)'} path")
+        return
+
     total = len(claim_ids)
     _p(f"\n══ Scanning {total} run(s) — "
        f"{'AFFECTED-ONLY' if affected_only else 'ALL in-scope'} ══")
