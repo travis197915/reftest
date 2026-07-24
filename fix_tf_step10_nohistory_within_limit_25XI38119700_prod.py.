@@ -331,13 +331,14 @@ def main() -> None:
     ap.add_argument("--apply", action="store_true")
     opts = ap.parse_args()
     dry = not opts.apply
-    # Item #65: default to the flagged claim when none is named. An explicitly
-    # named claim (or the default) forces a full walker recompute on just that
-    # claim; ``--all`` (no claim filter) sweeps every affected within-limit
-    # no-history claim via the affected-claim gate.
-    if not opts.claim and not opts.claims_file:
+    # Item #65: default to the flagged claim when neither a claim nor --all is
+    # given. An explicitly-named claim (or the default) forces a full walker
+    # recompute on just that claim; ``--all`` (no claim filter) scans every run
+    # and lets the affected-claim gate self-select the within-limit no-history
+    # population.
+    if not opts.claim and not opts.claims_file and not opts.all:
         opts.claim = ["25XI38119700"]
-    affected_only = not (opts.all or opts.claim or opts.claims_file)
+    affected_only = not (opts.claim or opts.claims_file)
 
     for key, val in _PROD_ENV.items():
         os.environ.setdefault(key, val)
